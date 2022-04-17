@@ -23,7 +23,8 @@ class paths:
     totalcapture_dir = 'data/dataset_work/TotalCapture'          # output path for the preprocessed TotalCapture dataset
 
     example_dir = 'data/example'                    # example IMU measurements
-    smpl_file = 'models/SMPL_male.pkl'              # official SMPL model path
+    #smpl_file = 'models/SMPL_male.pkl'              
+    smpl_file = 'basicmodel_m_lbs_10_207_0_v1.0.0'  # official SMPL model path
     weights_file = 'data/weights.pt'                # network weight file
 
 
