@@ -11,16 +11,16 @@ amass_data = ['HumanEva', 'MPI_HDM05', 'SFU', 'MPI_mosh', 'Transitions_mocap', '
 
 
 class paths:
-    raw_amass_dir = 'data/dataset_raw/AMASS'      # raw AMASS dataset path (raw_amass_dir/ACCAD/ACCAD/s001/*.npz)
-    amass_dir = 'data/dataset_work/AMASS'         # output path for the synthetic AMASS dataset
+    raw_amass_dir = '../../dataset/dataset_raw/AMASS'      # raw AMASS dataset path (raw_amass_dir/ACCAD/ACCAD/s001/*.npz)
+    amass_dir = '../../dataset/dataset_work/AMASS'         # output path for the synthetic AMASS dataset
 
-    raw_dipimu_dir = 'data/dataset_raw/DIP_IMU'   # raw DIP-IMU dataset path (raw_dipimu_dir/s_01/*.pkl)
-    dipimu_dir = 'data/dataset_work/DIP_IMU'      # output path for the preprocessed DIP-IMU dataset
+    raw_dipimu_dir = '../../dataset/dataset_raw/DIP_IMU'   # raw DIP-IMU dataset path (raw_dipimu_dir/s_01/*.pkl)
+    dipimu_dir = '../../dataset/dataset_work/DIP_IMU'      # output path for the preprocessed DIP-IMU dataset
 
     # DIP recalculates the SMPL poses for TotalCapture dataset. You should acquire the pose data from the DIP authors.
-    raw_totalcapture_dip_dir = 'data/dataset_raw/TotalCapture/DIP_recalculate'  # contain ground-truth SMPL pose (*.pkl)
-    raw_totalcapture_official_dir = 'data/dataset_raw/TotalCapture/official'    # contain official gt (S1/acting1/gt_skel_gbl_pos.txt)
-    totalcapture_dir = 'data/dataset_work/TotalCapture'          # output path for the preprocessed TotalCapture dataset
+    raw_totalcapture_dip_dir = '../../dataset/dataset_raw/TotalCapture/DIP_recalculate'  # contain ground-truth SMPL pose (*.pkl)
+    raw_totalcapture_official_dir = '../../dataset/dataset_raw/TotalCapture/official'    # contain official gt (S1/acting1/gt_skel_gbl_pos.txt)
+    totalcapture_dir = '../../dataset/dataset_work/TotalCapture'          # output path for the preprocessed TotalCapture dataset
 
     example_dir = 'data/example'                    # example IMU measurements
     #smpl_file = 'models/SMPL_male.pkl'              
