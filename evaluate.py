@@ -29,7 +29,7 @@ class PoseEvaluator:
                                   'Mesh Error (cm)', 'Jitter Error (100m/s^3)']):
             print('%s: %.2f (+/- %.2f)' % (name, errors[i, 0], errors[i, 1]))
 
-
+@torch.no_grad()
 def evaluate_pose(dataset, num_past_frame=20, num_future_frame=5):
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     evaluator = PoseEvaluator()

@@ -25,7 +25,7 @@ class TransPoseNet(torch.nn.Module):
     Whole pipeline for pose and translation estimation.
     """
     def __init__(self, num_past_frame=20, num_future_frame=5, hip_length=None, upper_leg_length=None,
-                 lower_leg_length=None, prob_threshold=(0.5, 0.9), gravity_velocity=-0.018):
+                 lower_leg_length=None, prob_threshold=(0.5, 0.9), gravity_velocity=-0.018, joint_mask=torch.tensor([1, 2, 16, 17]), is_train=False):
         r"""
         :param num_past_frame: Number of past frames for a biRNN window.
         :param num_future_frame: Number of future frames for a biRNN window.
@@ -68,6 +68,9 @@ class TransPoseNet(torch.nn.Module):
         self.gravity_velocity = torch.tensor([0, gravity_velocity, 0])
         self.feet_pos = j[10:12].clone()
         self.floor_y = j[10:12, 1].min().item()
+        self.joint_mask = joint_mask
+
+        self.is_train = is_train
 
         # variable
         self.rnn_state = None
@@ -77,8 +80,9 @@ class TransPoseNet(torch.nn.Module):
         self.last_root_pos = torch.zeros(3)
         self.reset()
 
-        self.load_state_dict(torch.load(paths.weights_file))
-        self.eval()
+        if not self.is_train:
+            self.load_state_dict(torch.load(paths.weights_file))
+            self.eval()
 
     def _reduced_glb_6d_to_full_local_mat(self, root_rotation, glb_reduced_pose):
         glb_reduced_pose = art.math.r6d_to_rotation_matrix(glb_reduced_pose).view(-1, joint_set.n_reduced, 3, 3)
@@ -104,14 +108,13 @@ class TransPoseNet(torch.nn.Module):
         self.last_root_pos = torch.zeros(3)
 
     def forward(self, imu, rnn_state=None):
-        leaf_joint_position = self.pose_s1.forward(imu)[0]
-        full_joint_position = self.pose_s2.forward(torch.cat((leaf_joint_position, imu), dim=1))[0]
-        global_reduced_pose = self.pose_s3.forward(torch.cat((full_joint_position, imu), dim=1))[0]
-        contact_probability = self.tran_b1.forward(torch.cat((leaf_joint_position, imu), dim=1))[0]
-        velocity, rnn_state = self.tran_b2.forward(torch.cat((full_joint_position, imu), dim=1), rnn_state)
-        return leaf_joint_position, full_joint_position, global_reduced_pose, contact_probability, velocity, rnn_state
+        self.leaf_joint_position = self.pose_s1.forward(imu)[0]
+        self.full_joint_position = self.pose_s2.forward(torch.cat((self.leaf_joint_position, imu), dim=1))[0]
+        self.global_reduced_pose = self.pose_s3.forward(torch.cat((self.full_joint_position, imu), dim=1))[0]
+        self.contact_probability = self.tran_b1.forward(torch.cat((self.leaf_joint_position, imu), dim=1))[0]
+        self.velocity, self.rnn_state = self.tran_b2.forward(torch.cat((self.full_joint_position, imu), dim=1), rnn_state)
+        return self.leaf_joint_position, self.full_joint_position, self.global_reduced_pose, self.contact_probability, self.velocity, self.rnn_state
 
-    @torch.no_grad()
     def forward_offline(self, imu):
         r"""
         Offline forward.
@@ -119,6 +122,7 @@ class TransPoseNet(torch.nn.Module):
         :param imu: Tensor in shape [num_frame, input_dim(6 * 3 + 6 * 9)].
         :return: Pose tensor in shape [num_frame, 24, 3, 3] and translation tensor in shape [num_frame, 3].
         """
+
         _, _, global_reduced_pose, contact_probability, velocity, _ = self.forward(imu)
 
         # calculate pose (local joint rotation matrices)
@@ -148,7 +152,6 @@ class TransPoseNet(torch.nn.Module):
 
         return pose, self.velocity_to_root_position(velocity)
 
-    @torch.no_grad()
     def forward_online(self, x):
         r"""
         Online forward.
@@ -187,13 +190,83 @@ class TransPoseNet(torch.nn.Module):
         self.imu = imu
         self.last_root_pos += velocity
         return pose, self.last_root_pos.clone()
+        
+    def compute_loss_s1(self, gt_leaf_joint_position):
+        """
+        Compute loss from S1
+        
+        MeanSquareError for the root-relative positions of the leaf joints
+        """
+        return torch.nn.MSELoss()(self.leaf_joint_position, gt_leaf_joint_position)
+        
+    def compute_loss_s2(self, gt_joint_position):
+        """
+        Compute loss from S2
+        
+        MeanSquareError for the root-relative positions of all joints
+        """
+        return torch.nn.MSELoss()(self.full_joint_position, gt_joint_position)
+        
+    def compute_loss_s3(self, gt_joint_rotation):
+        """
+        Compute loss from S3
+        
+        MeanSquareError for the ratation of all joints in 6D representation
+        """
+        return torch.nn.MSELoss()(self.global_reduced_pose, gt_joint_rotation)
+        
+    def compute_loss_b1(self, gt_contact_probability):
+        # Both feet are included in contact_probability
+        # cross-entropy loss to get the foot contact probability
+        output = self.contact_probability
+        loss = gt_contact_probability * torch.log(output) + (1.0 - gt_contact_probability) * torch.log(1.0 - output)
+        loss = loss * -1.0
+        return loss
+
+    def compute_loss_vel(self, gt_velocity, frame_range=1):
+        t = self.velocity.shape[0]
+        v_dim = self.velocity.shape[1]
+        num_windows = t // frame_range
+        start_frame = torch.randint(t - num_windows * frame_range) if t % frame_range != 0 else 0
+
+        end_frame = t - t % frame_range + start_frame
+        velocity_trim = self.velocity[start_frame:end_frame].reshape(-1, frame_range, v_dim)
+        gt_velocity_trim = gt_velocity[start_frame:end_frame].reshape(-1, frame_range, v_dim)
+
+        frame_velocity = torch.sum(velocity_trim, dim=1)
+        gt_frame_velocity = torch.sum(gt_velocity_trim, dim=1)
+
+        return torch.nn.MSELoss(reduction='sum')(frame_velocity, gt_frame_velocity)
+
+    def compute_loss_b2(self, gt_vel):
+        # something related to velocity
+        # check shape of the input (temporal dimension)
+        loss = sum([self.compute_loss_vel(gt_vel, i) for i in [1, 3, 9, 27]])
+        return loss
+    
+    def compute_loss(self, gt_joint_position, gt_joint_rotation, gt_contact_probability, gt_velocity):
+        loss_s1 = self.compute_loss_s1(gt_joint_position[self.joint_mask])
+        loss_s2 = self.compute_loss_s2(gt_joint_position)
+        loss_s3 = self.compute_loss_s3(gt_joint_rotation)
+        
+        loss_b1 = self.compute_loss_b1(gt_contact_probability)
+        loss_b2 = self.compute_loss_b2(gt_velocity)
+        
+        self.loss_details = [loss_s1, loss_s2, loss_s3, loss_b1, loss_b2]
+
+        return sum(self.loss_details)
+        
+    def set_loss_names(self):
+        self.loss_names = ['s1', 's2', 's3', 'b1', 'b2']
 
     @staticmethod
     def velocity_to_root_position(velocity):
-        r"""
+        """
         Change velocity to root position. (not optimized)
 
         :param velocity: Velocity tensor in shape [num_frame, 3].
         :return: Translation tensor in shape [num_frame, 3] for root positions.
         """
-        return torch.stack([velocity[:i+1].sum(dim=0) for i in range(velocity.shape[0])])
+
+        # return torch.stack([velocity[:i+1].sum(dim=0) for i in range(velocity.shape[0])])
+        return torch.cumsum(velocity, dim=0)
