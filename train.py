@@ -11,7 +11,7 @@ from config import *
 import os
 import articulate as art
 from utils import normalize_and_concat
-from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence
+from torch.nn.utils.rnn import pad_sequence
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
@@ -35,77 +35,101 @@ class PoseEvaluator:
             print('%s: %.2f (+/- %.2f)' % (name, errors[i, 0], errors[i, 1]))
 
 
+def pad_collate(batch):
+    (x, p, t) = zip(*batch)
+    x_lens = [len(x0) for x0 in x]
+
+    x_pad = pad_sequence(x, batch_first=True, padding_value=-10.0)
+    p_pad = pad_sequence(p, batch_first=True, padding_value=-10.0)
+    t_pad = pad_sequence(t, batch_first=True, padding_value=-10.0)
+
+    return x_pad, p_pad, t_pad, x_lens
+
+
 class Timeseries(Dataset):
     def __init__(self, x, y):
         self.start_idx = []
         self.end_idx = []
 
-        self.xs = torch.vstack(x)
-        pose, tran = zip(*y)
+        self.p, self.t = zip(*y)
+        self.x = x
+
+        self.len = len(x)
         self.sequence_lengths = torch.tensor(list(map(lambda i: i.shape[0], x)))
         self.max_length = max(self.sequence_lengths)
-        self.end_idx = self.sequence_lengths.cumsum(dim=-1)
-        self.len = self.end_idx.shape[0]
-
-        self.pose = torch.vstack(pose)
-        self.tran = torch.vstack(tran)
 
     def __getitem__(self, idx):
-        sequence_slice = slice(self.end_idx[idx-1] if idx != 0 else 0, self.end_idx[idx])
-        return self.xs[sequence_slice], self.pose[sequence_slice], self.tran[sequence_slice]
+        return self.x[idx], self.p[idx], self.t[idx]
 
     def __len__(self):
         return self.len
 
 
+'''TODO:
+We separately train each network with the batch size of 256 using
+an Adam [Kingma and Ba 2014] optimizer with a learning rate
+lr = 10−3. We follow DIP to train the models for the pose estimation
+task using synthetic AMASS first and fine-tune them on DIP-IMU
+which contains real IMU measurements. To avoid the vertical drift
+due to the error accumulation in the estimation of translations, we
+add a gravity velocity 𝑣𝐺 = 0.018 to the Trans-B1 output 𝒗𝑓 to pull
+the body down
+'''
+
+
 def train_pose(train_dataset, num_past_frame=20, num_future_frame=5, epoch=20):
     evaluator = PoseEvaluator()
-    net = TransPoseNet(num_past_frame, num_future_frame, is_train=False).to(device)
+    net = TransPoseNet(num_past_frame, num_future_frame, is_train=True).to(device)
 
     offline_errs, online_errs = [], []
 
-    loader = DataLoader(train_dataset, shuffle=True, batch_size=256)
+    loader = DataLoader(train_dataset, shuffle=True, batch_size=16, collate_fn=pad_collate)
 
     for i in range(epoch):
-        for x, y in tqdm.tqdm(loader):
+        for x, pose_t, tran_t, seq_lengths in tqdm.tqdm(loader):
             net.reset()
-            online_results = [net.forward_online(f) for f in torch.cat((x, x[-1].repeat(num_future_frame, 1)))]
-            pose_p_online, tran_p_online = [torch.stack(_)[num_future_frame:] for _ in zip(*online_results)]
-            pose_p_offline, tran_p_offline = net.forward_offline(x)
-            pose_t, tran_t = y
+            pose_p_offline, tran_p_offline = net.forward_offline(x, seq_lengths=seq_lengths)
             offline_errs.append(evaluator.eval(pose_p_offline, pose_t))
-            online_errs.append(evaluator.eval(pose_p_online, pose_t))
 
     print('============== offline ================')
     evaluator.print(torch.stack(offline_errs).mean(dim=0))
-    print('============== online ================')
-    evaluator.print(torch.stack(online_errs).mean(dim=0))
 
 
-def load_dataset(dataset_path, is_train=True):
+def load_dataset(dataset_path, is_train=True, max_length=2000):
     data = torch.load(os.path.join(dataset_path, 'train.pt' if is_train else 'test.pt'))
     xs = [normalize_and_concat(a, r).to(device) for a, r in zip(data['acc'], data['ori'])]
     ys = [(art.math.axis_angle_to_rotation_matrix(p).view(-1, 24, 3, 3), t) for p, t in zip(data['pose'], data['tran'])]
+
+    if max_length is not None:
+        total_seqs = len(xs)
+        # TODO: Slice too long sequences instead of filtering them
+        xs = list(filter(lambda x: x.shape[0] < max_length, xs))
+        ys = list(filter(lambda x: x[0].shape[0] < max_length, ys))
+        print("Filtered {}/{} Sequences that are longer than {} frames".format(total_seqs - len(xs), total_seqs, max_length))
+
     return xs, ys
 
 
 def merge_dataset(datasets):
     # Merge sequences from datasets into one list
     xs, ys = [], []
+
     for x, y in datasets:
         xs.extend(x)
         ys.extend(y)
+
     return xs, ys
 
 
 if __name__ == '__main__':
     # torch.backends.cudnn.enabled = False   # if cudnn error, uncomment this line
 
-    dipimu_data = load_dataset(paths.dipimu_dir)
-    amass_data = load_dataset(paths.amass_dir)
-    # load_dataset(paths.totalcapture_dir)
+    data_list = []
+    data_list.append(load_dataset(paths.dipimu_dir))
+    # data_list.append(load_dataset(paths.amass_dir))
+    # data_list.append(load_dataset(paths.totalcapture_dir))
 
-    sequence_x, sequence_y = merge_dataset([dipimu_data, amass_data])
+    sequence_x, sequence_y = merge_dataset(data_list)
     dataset = Timeseries(x=sequence_x, y=sequence_y)
     train_pose(dataset, epoch=20)  # Split train and test data later
 
